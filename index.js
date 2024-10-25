@@ -201,13 +201,13 @@ const writeResultsToCSV = async (data, jobId) => {
     results.forEach(row => {
         let filePath;
         if (row.verificationResult === 'deliverable') {
-            filePath = path.join(outputDir, 'validEmails.csv');
+            filePath = path.join(outputDir, config.validEmails);
         } else if (row.verificationResult === 'undeliverable') {
-            filePath = path.join(outputDir, 'invalidEmails.csv');
+            filePath = path.join(outputDir, config.invalidEmails);
         } else if (row.verificationResult === 'accept-all') {
-            filePath = path.join(outputDir, 'acceptAll.csv');
+            filePath = path.join(outputDir, config.acceptAll);
         } else if (row.verificationResult === 'unknown') {
-            filePath = path.join(outputDir, 'unknown.csv');
+            filePath = path.join(outputDir, config.unknown);
         }
 
         if (filePath) {
@@ -279,7 +279,7 @@ async function processCSV(filePath) {
                         const batch = emailArray.slice(i, i + config.batchSize);
                         // console.log("Batches array", batch)
                         const res = await validateDomainEmails(batch);
-                        // await batchUploadEmailAddresses(res, config.batchSize);
+                        await batchUploadEmailAddresses(res, config.batchSize);
                     }
                     console.log('CSV file processed successfully.');
                     resolve(); 

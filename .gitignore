@@ -1,13 +1,7 @@
 # Ignore node_modules
 node_modules
 
-# Ignore bouncify folder and its contents
-bouncify/
-
-.eemails.csv
-
 sanitized_userEmails/
 
 config.js
-
- eemails.csv
+eemails.csv

@@ -7,7 +7,7 @@ import blacklistDomains from './blacklistEmailDomains.js'
 
 const blacklistSet = new Set(blacklistDomains);
 
-let job_id = [];
+let job_ids = [];
 let downloadedResponse;
 
 const getOutputPathFromArgs = () => {
@@ -45,6 +45,7 @@ const appendEmailsToFile = async (filePath, emails) => {
 
 const extractDomainFromEmail = async (email) => {
     const parts = email.split("@");
+    console.log("Domain & email", email, parts, parts[1])
     return parts[1];
   };
 const validateDomainEmails = async (emails) => {
@@ -54,10 +55,11 @@ const validateDomainEmails = async (emails) => {
     await Promise.all(
       emails.map(async (email) => {
         const domain = await extractDomainFromEmail(email);
-        if (!blacklistSet.has(domain)) {
-          validEmails.push(email);
-        } else {
-          invalidEmails.push(email);
+        if(domain && !blacklistSet.has(domain)) {
+            validEmails.push(email);
+        }
+        else {
+            invalidEmails.push(email);
         }
       })
     );
@@ -99,12 +101,11 @@ const completedJobs = async (jobId) => {
     console.log('JobIDPATH',jobIdFilePath)
     const headersWritten = fs.existsSync(jobIdFilePath);
     
-    // Write headers if the file is new
     if (!headersWritten) {
         fs.appendFileSync(jobIdFilePath, 'jobId\n', 'utf8');
     }
 
-    fs.appendFile(jobIdFilePath, `${jobId}\n`, (err) => {
+    fs.appendFile(jobIdFilePath, `${jobId}\n`, (err) => { 
         if (err) {
             console.error(`Error saving job ID to file: ${err.message}`);
         } else {
@@ -114,7 +115,6 @@ const completedJobs = async (jobId) => {
 };
 
 const uploadEmailBatch = async (batch) => {
-    console.log("calledEmail")
     try {
         const response = await axios.post(`${config.apiUrl}/bulk`, {
             auto_verify: true,
@@ -127,9 +127,9 @@ const uploadEmailBatch = async (batch) => {
                 'Content-Type': 'application/json'
             }
         });
-
+        console.log("Uploaded batch:", batch);
         const jobId = response?.data?.job_id;
-        job_id.push(jobId);
+        job_ids.push(jobId);
         await saveJobIdToFile(jobId)
         console.log("JOBID",jobId)
     } catch (err) {
@@ -243,9 +243,11 @@ const checkJobStatusById = async (jobId) => {
                 'Accept': 'application/json'
             }
         });
+        console.log("Job id response:", res.data.message);
         return res.data;
     } catch (err) {
-        console.error("Error checking job status for Job ID:", jobId, err);
+        console.error("Error checking job status for Job ID:", err.data);
+        return null;
     }
 };
 const batchUploadEmailAddresses = async (emails, batchSize) => {
@@ -260,6 +262,7 @@ const batchUploadEmailAddresses = async (emails, batchSize) => {
  
 async function processCSV(filePath) {
     const emailArray = [];
+    console.log('EmailArray',emailArray);
 
     return new Promise((resolve, reject) => {
         fs.createReadStream(filePath)
@@ -274,8 +277,9 @@ async function processCSV(filePath) {
                 try {
                     for (let i = 0; i < emailArray.length; i += config.batchSize) {
                         const batch = emailArray.slice(i, i + config.batchSize);
+                        // console.log("Batches array", batch)
                         const res = await validateDomainEmails(batch);
-                        await batchUploadEmailAddresses(res, config.batchSize);
+                        // await batchUploadEmailAddresses(res, config.batchSize);
                     }
                     console.log('CSV file processed successfully.');
                     resolve(); 
@@ -287,30 +291,55 @@ async function processCSV(filePath) {
     });
 }
   
-  const main = async () => {
+const main = async () => {
     console.log("called main()");
     const filePath = getInputFilePathFromArgs(); 
     try {
-        let batch =[]
+        const INvalidJobIDs = [];
         console.log('File Path:', filePath);
-        await processCSV(filePath).then(() => console.log('Processing completed!')).catch((err) => console.error(err));
-        console.log('All batches uploaded! Now checking job status and downloading results...');
-        console.log("Jobs:", job_id);
 
-        for (const id of job_id) {
-            let complete = false;
-            while (!complete) {
-                const res = await checkJobStatusById(id); 
-                if (res?.status === "completed") {
-                    complete = true;
+        await processCSV(filePath).then(() => console.log('Processing completed!')).catch((err) => console.error('Error during CSV processing:', err));
+        
+        console.log('All batches uploaded! Now checking job status and downloading results...');
+        console.log("Jobs:", job_ids);
+
+        const jobStatus = job_ids.reduce((statusMap, id) => ({ ...statusMap, [id]: false }), {});
+
+        while (Object.values(jobStatus).some(status => !status)) {
+            await Promise.all(job_ids.map(async (id) => {
+                if (jobStatus[id]) return; 
+
+                const res = await checkJobStatusById(id);
+                if(res === null){
+                    console.log("Job not found for: ", id);
+                    INvalidJobIDs.push(id);
+                    jobStatus[id] = true;
+                } else if (res?.status === "completed") {
+                    jobStatus[id] = true;
                     console.log(`Job completed for Job ID: ${id}. Downloading results...`);
-                    await downloadEmailResults(id); 
+                    await downloadEmailResults(id);
+                } else if (res?.status === "cancelled") {
+                    console.log(`Cancelled job for Job ID: ${id}. Exiting due to invalid data format`, res);
+                    jobStatus[id] = true; 
+                } else if (res?.status === "failed") {
+                    console.log(`Unable to process job for Job ID: ${id}. The uploaded list contains invalid data`, res);
+                    jobStatus[id] = true; 
                 } else {
-                    console.log(`Job still in progress for Job ID: ${id}, checking again in 10 seconds...`);
-                    await new Promise(resolve => setTimeout(resolve, 10000)); 
+                    console.log(`Job still in progress for Job ID: ${id}, checking again in 5 seconds...`);
                 }
-            }
+            }));
+
+            await new Promise(resolve => setTimeout(resolve, 5000));
         }
+
+        console.log("All jobs processed.");
+        const outputPath = getOutputPathFromArgs();
+        const INvalidJobs = path.join(`${outputPath}/${config.outputFolderName}`, config.invalidJobIds);
+        if (!fs.existsSync(path.join(outputPath, config.outputFolderName))) {
+            fs.mkdirSync(path.join(outputPath, config.outputFolderName), { recursive: true });
+        }
+        await appendEmailsToFile(INvalidJobs, INvalidJobIDs);
+
     } catch (err) {
         console.error("Error in main function:", err);
     }

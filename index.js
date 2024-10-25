@@ -279,7 +279,7 @@ async function processCSV(filePath) {
                         const batch = emailArray.slice(i, i + config.batchSize);
                         // console.log("Batches array", batch)
                         const res = await validateDomainEmails(batch);
-                        // await batchUploadEmailAddresses(res, config.batchSize);
+                        await batchUploadEmailAddresses(res, config.batchSize);
                     }
                     console.log('CSV file processed successfully.');
                     resolve(); 

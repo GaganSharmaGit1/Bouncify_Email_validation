@@ -5,7 +5,7 @@ import csv from 'csv-parser';
 import config from './config.js';
 import blacklistDomains from './blacklistEmailDomains.js'
 
-const blacklistSet = new Set(blacklistDomains);
+const blacklistEmailDomainsSet = new Set(blacklistDomains);
 
 let job_ids = [];
 let downloadedResponse;
@@ -19,6 +19,18 @@ const getOutputPathFromArgs = () => {
         return outputPath;  
     } else {
         throw new Error('Please provide an output path with the -o flag');
+    }
+};
+
+const getInputFilePathFromArgs = () => {
+    const args = process.argv;
+    const filePathIndex = args.indexOf('-p') + 1;
+    if (filePathIndex > 0 && args[filePathIndex]) {
+        const jsonFilePath = args[filePathIndex];
+        console.log('File Path:', jsonFilePath);
+        return jsonFilePath;  
+    } else {
+        throw new Error('Please provide a file path with the -p flag');
     }
 };
 
@@ -43,19 +55,19 @@ const appendEmailsToFile = async (filePath, emails) => {
 };
 
 
-const extractDomainFromEmail = async (email) => {
+const getEmailDomain = async (email) => {
     const parts = email.split("@");
-    console.log("Domain & email", email, parts, parts[1])
     return parts[1];
-  };
+};
+
 const validateDomainEmails = async (emails) => {
     const validEmails = [];
     const invalidEmails = [];
   
     await Promise.all(
       emails.map(async (email) => {
-        const domain = await extractDomainFromEmail(email);
-        if(domain && !blacklistSet.has(domain)) {
+        const domain = await getEmailDomain(email);
+        if(domain && !blacklistEmailDomainsSet.has(domain)) {
             validEmails.push(email);
         }
         else {
@@ -78,7 +90,7 @@ const validateDomainEmails = async (emails) => {
   };
 
 
-const saveJobIdToFile = async (jobId) => {
+const saveJobId = async (jobId) => {
     const outputPath =  getOutputPathFromArgs();
     const jobIdFilePath = path.join(`${outputPath}/${config.outputFolderName}`, config.jobIds );
     const headersWritten = fs.existsSync(jobIdFilePath);
@@ -95,7 +107,8 @@ const saveJobIdToFile = async (jobId) => {
         }
     });
 };
-const completedJobs = async (jobId) => {
+
+const completedJobIds = async (jobId) => {
     const outputPath = getOutputPathFromArgs();
     const jobIdFilePath = path.join(`${outputPath}/${config.outputFolderName}`, config.completedJobId );
     console.log('JobIDPATH',jobIdFilePath)
@@ -130,39 +143,14 @@ const uploadEmailBatch = async (batch) => {
         console.log("Uploaded batch:", batch);
         const jobId = response?.data?.job_id;
         job_ids.push(jobId);
-        await saveJobIdToFile(jobId)
+        await saveJobId(jobId)
         console.log("JOBID",jobId)
     } catch (err) {
         console.error("Error uploading batch:", err);
     }
 };
 
-const downloadEmailResults = async (id) => {
-    try {
-        const downloadResponse = await axios.post(
-            `${config.apiUrl}/download?jobId=${id}&apikey=${config.apikey}`,
-            {
-                filterResult: ['deliverable', 'undeliverable', 'accept_all', 'unknown']
-            },
-            {
-                headers: {
-                    'Accept': 'text/plain',
-                    'Content-Type': 'application/json'
-                }
-            }
-        );
-
-        downloadedResponse = downloadResponse?.data;
-        await writeResultsToCSV(downloadedResponse, id);
-        await completedJobs(id);
-    } catch (err) {
-        console.error("Error downloading results:", err);
-    }
-};
-
-
-
-const writeResultsToCSV = async (data, jobId) => {
+const saveEmailVerificationResults = async (data, jobId) => {
     const results = [];
     const outputPath = getOutputPathFromArgs();
 
@@ -224,17 +212,29 @@ const writeResultsToCSV = async (data, jobId) => {
     });
 };
 
-const getInputFilePathFromArgs = () => {
-    const args = process.argv;
-    const filePathIndex = args.indexOf('-p') + 1;
-    if (filePathIndex > 0 && args[filePathIndex]) {
-        const jsonFilePath = args[filePathIndex];
-        console.log('File Path:', jsonFilePath);
-        return jsonFilePath;  
-    } else {
-        throw new Error('Please provide a file path with the -p flag');
+const getEmailResults = async (id) => {
+    try {
+        const downloadResponse = await axios.post(
+            `${config.apiUrl}/download?jobId=${id}&apikey=${config.apikey}`,
+            {
+                filterResult: ['deliverable', 'undeliverable', 'accept_all', 'unknown']
+            },
+            {
+                headers: {
+                    'Accept': 'text/plain',
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+        downloadedResponse = downloadResponse?.data;
+        await saveEmailVerificationResults(downloadedResponse, id);
+        await completedJobIds(id);
+    } catch (err) {
+        console.error("Error downloading results:", err);
     }
 };
+
 const checkJobStatusById = async (jobId) => {
     console.log(`Checking Job Status for Job ID: ${jobId}`);
     try {
@@ -250,6 +250,7 @@ const checkJobStatusById = async (jobId) => {
         return null;
     }
 };
+
 const batchUploadEmailAddresses = async (emails, batchSize) => {
 
     for (let i = 0; i < emails.length; i += batchSize) {
@@ -277,9 +278,9 @@ async function processCSV(filePath) {
                 try {
                     for (let i = 0; i < emailArray.length; i += config.batchSize) {
                         const batch = emailArray.slice(i, i + config.batchSize);
-                        // console.log("Batches array", batch)
+                        console.log("Batches array", batch)
                         const res = await validateDomainEmails(batch);
-                        await batchUploadEmailAddresses(res, config.batchSize);
+                        // await batchUploadEmailAddresses(res, config.batchSize);
                     }
                     console.log('CSV file processed successfully.');
                     resolve(); 
@@ -292,9 +293,9 @@ async function processCSV(filePath) {
 }
   
 const main = async () => {
-    console.log("called main()");
-    const filePath = getInputFilePathFromArgs(); 
     try {
+        const filePath = getInputFilePathFromArgs(); 
+        const outputPath = getOutputPathFromArgs();
         const INvalidJobIDs = [];
         console.log('File Path:', filePath);
 
@@ -317,7 +318,7 @@ const main = async () => {
                 } else if (res?.status === "completed") {
                     jobStatus[id] = true;
                     console.log(`Job completed for Job ID: ${id}. Downloading results...`);
-                    await downloadEmailResults(id);
+                    await getEmailResults(id);
                 } else if (res?.status === "cancelled") {
                     console.log(`Cancelled job for Job ID: ${id}. Exiting due to invalid data format`, res);
                     jobStatus[id] = true; 
@@ -333,7 +334,6 @@ const main = async () => {
         }
 
         console.log("All jobs processed.");
-        const outputPath = getOutputPathFromArgs();
         const INvalidJobs = path.join(`${outputPath}/${config.outputFolderName}`, config.invalidJobIds);
         if (!fs.existsSync(path.join(outputPath, config.outputFolderName))) {
             fs.mkdirSync(path.join(outputPath, config.outputFolderName), { recursive: true });

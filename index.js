@@ -5,11 +5,9 @@ import csv from 'csv-parser';
 import config from './config.js';
 import blacklistDomains from './blacklistEmailDomains.js'
 
-const blacklistEmailDomainsSet = new Set(blacklistDomains);
-
+const createBlacklistDomainsSet = new Set(blacklistDomains);
 let job_ids = [];
 let downloadedResponse;
-
 const getOutputPathFromArgs = () => {
     const args = process.argv;
     const outputPathIndex = args.indexOf('-o') + 1;
@@ -21,6 +19,7 @@ const getOutputPathFromArgs = () => {
         throw new Error('Please provide an output path with the -o flag');
     }
 };
+const outputPath =  getOutputPathFromArgs();
 
 const getInputFilePathFromArgs = () => {
     const args = process.argv;
@@ -34,7 +33,7 @@ const getInputFilePathFromArgs = () => {
     }
 };
 
-const appendEmailsToFile = async (filePath, emails) => {
+const saveEmailsToFile = async (filePath, emails) => {
     const outputDir = path.dirname(filePath);
     console.log("Output directory:", filePath);
     if (!fs.existsSync(outputDir)) {
@@ -54,8 +53,27 @@ const appendEmailsToFile = async (filePath, emails) => {
     });
 };
 
+const saveInvalidJobIds = async (filePath, emails) => {
+    const outputDir = path.dirname(filePath);
+    console.log("Output directory:", filePath);
+    if (!fs.existsSync(outputDir)) {
+        fs.mkdirSync(outputDir, { recursive: true });
+    }
+    const data = emails.map(email => `${email.trim()}\n`).join('');
+    const headersWritten = fs.existsSync(filePath);
+    if (!headersWritten) {
+        fs.writeFileSync(filePath, 'jobId\n', 'utf8');
+    }
+    fs.appendFile(filePath, data, (err) => {
+        if (err) {
+            console.error(`Error appending invlid job idsto file ${filePath}: ${err.message}`);
+        } else {
+            console.log(`invalid job ids appended to ${filePath}`);
+        }
+    });
+};
 
-const getEmailDomain = async (email) => {
+const extractEmailDomain = async (email) => {
     const parts = email.split("@");
     return parts[1];
 };
@@ -66,8 +84,8 @@ const validateDomainEmails = async (emails) => {
   
     await Promise.all(
       emails.map(async (email) => {
-        const domain = await getEmailDomain(email);
-        if(domain && !blacklistEmailDomainsSet.has(domain)) {
+        const domain = await extractEmailDomain(email);
+        if(domain && !createBlacklistDomainsSet.has(domain)) {
             validEmails.push(email);
         }
         else {
@@ -75,7 +93,6 @@ const validateDomainEmails = async (emails) => {
         }
       })
     );
-    const outputPath = getOutputPathFromArgs();
     const invalidEmailsFilePath = path.join(`${outputPath}/${config.outputFolderName}`, config.inValidEmailDomainFile);
     const validEmailsFilePath = path.join(`${outputPath}/${config.outputFolderName}`, config.validEmailDomainFile);
     
@@ -83,15 +100,13 @@ const validateDomainEmails = async (emails) => {
         fs.mkdirSync(path.join(outputPath, config.outputFolderName), { recursive: true });
     }
 
-    await appendEmailsToFile(invalidEmailsFilePath, invalidEmails);
-    await appendEmailsToFile(validEmailsFilePath, validEmails);
+    await saveEmailsToFile(invalidEmailsFilePath, invalidEmails);
+    await saveEmailsToFile(validEmailsFilePath, validEmails);
     
     return validEmails;
   };
 
-
 const saveJobId = async (jobId) => {
-    const outputPath =  getOutputPathFromArgs();
     const jobIdFilePath = path.join(`${outputPath}/${config.outputFolderName}`, config.jobIds );
     const headersWritten = fs.existsSync(jobIdFilePath);
     
@@ -109,7 +124,6 @@ const saveJobId = async (jobId) => {
 };
 
 const completedJobIds = async (jobId) => {
-    const outputPath = getOutputPathFromArgs();
     const jobIdFilePath = path.join(`${outputPath}/${config.outputFolderName}`, config.completedJobId );
     console.log('JobIDPATH',jobIdFilePath)
     const headersWritten = fs.existsSync(jobIdFilePath);
@@ -146,14 +160,22 @@ const uploadEmailBatch = async (batch) => {
         await saveJobId(jobId)
         console.log("JOBID",jobId)
     } catch (err) {
-        console.error("Error uploading batch:", err);
+        if (err.response) {
+            if (err.response.status === 401) {
+                console.error("Unauthorized: Invalid API key. Please check your API key and try again.");
+                throw new Error("Unauthorized: Invalid API key");
+            } else if (err.response.status === 400) {
+                console.error("Bad Request: Invalid file data. Please check the file format and content.");
+                throw new Error("Bad Request: Invalid file data");
+            }
+        } else {
+            console.error("Error uploading batch:", err);
+        }
     }
 };
 
 const saveEmailVerificationResults = async (data, jobId) => {
     const results = [];
-    const outputPath = getOutputPathFromArgs();
-
     const outputDir = path.join(outputPath, config.outputFolderName); 
 
     if (!fs.existsSync(outputDir)) {
@@ -231,7 +253,33 @@ const getEmailResults = async (id) => {
         await saveEmailVerificationResults(downloadedResponse, id);
         await completedJobIds(id);
     } catch (err) {
-        console.error("Error downloading results:", err);
+        if (err.response) {
+            switch (err.response.status) {
+                case 401:
+                    console.error("Unauthorized: Invalid API Key. Please check your API key.");
+                    break;
+                case 400:
+                    const errorMessage = err.response.data.result;
+                    if (errorMessage.includes("Job not found")) {
+                        console.error("Error: Job not found. Invalid jobId.");
+                    } else if (errorMessage.includes("DOWNLOAD-RESTRICTED")) {
+                        console.error("Error: Download restricted. Please check your permissions.");
+                    } else if (errorMessage.includes("Invalid filterResult")) {
+                        console.error("Error: Invalid filterResult. Please provide correct filterResult options.");
+                    } else if (errorMessage.includes("Job is being verified")) {
+                        console.error("Error: Job is being verified, please wait until it completes.");
+                    } else if (errorMessage.includes("Job is ready for verification")) {
+                        console.error("Error: Job is ready for verification, please start verification and download your results once list verified.");
+                    } else {
+                        console.error("Error: Bad Request -", errorMessage);
+                    }
+                    break;
+                default:
+                    console.error("Error downloading results:", err.message);
+            }
+        } else {
+            console.error("Error downloading results:", err.message);
+        }
     }
 };
 
@@ -246,7 +294,17 @@ const checkJobStatusById = async (jobId) => {
         console.log("Job id response:", res.data.message);
         return res.data;
     } catch (err) {
-        console.error("Error checking job status for Job ID:", err.data);
+        if (err.response) {
+            if (err.response.status === 401) {
+                console.error("Error checking job status for Job ID:", jobId, "- Unauthorized: Invalid API Key");
+            } else if (err.response.status === 400 && err.response.data.result === "Job not found. Invalid jobId") {
+                console.error(`Error checking job status for Job ID: ${jobId} - Job not found. Invalid jobId`);
+            } else {
+                console.error("Error checking job status for Job ID:", err.response.data);
+            }
+        } else {
+            console.error("Error checking job status for Job ID:", err.message);
+        }
         return null;
     }
 };
@@ -259,31 +317,74 @@ const batchUploadEmailAddresses = async (emails, batchSize) => {
       console.log('Batch:', EmailBatch);
       const jobId = await uploadEmailBatch(EmailBatch);
     }
-  };
+};
  
-async function processCSV(filePath) {
-    const emailArray = [];
-    console.log('EmailArray',emailArray);
+async function readCSVFile(filePath) {
+    let emailArray = [];
+    let emailBatch = [];
+    let lineCounter = 0;
+    const csvReadBatchSize = config.batchSize;
 
     return new Promise((resolve, reject) => {
-        fs.createReadStream(filePath)
+        const fileStream = fs.createReadStream(filePath)
             .pipe(csv())
-            .on('data', (row) => {
+            .on('data', async (row) => {
                 const email = row['email'];
                 if (email) {
                     emailArray.push(email);
+                    lineCounter++;
                 }
+
+                if (lineCounter === csvReadBatchSize) {
+                    fileStream.pause(); 
+                    const res = await validateDomainEmails(emailArray);
+                    
+                    for (const email of res) {
+                        if (emailBatch.length < csvReadBatchSize) {
+                            emailBatch.push(email);
+                        } 
+                        
+                        if (emailBatch.length === csvReadBatchSize) {
+                            console.log("EmailBatch ready for upload:", emailBatch);
+                            // const jobId = await uploadEmailBatch(emailBatch); 
+                            await batchUploadEmailAddresses(emailBatch, csvReadBatchSize);
+                            emailBatch = []; 
+                        }
+                    }
+                    emailArray = []; 
+                    lineCounter = 0; 
+                    fileStream.resume(); 
+                }
+                
             })
             .on('end', async () => {
                 try {
-                    for (let i = 0; i < emailArray.length; i += config.batchSize) {
-                        const batch = emailArray.slice(i, i + config.batchSize);
-                        console.log("Batches array", batch)
-                        const res = await validateDomainEmails(batch);
-                        // await batchUploadEmailAddresses(res, config.batchSize);
+                    console.log("EmailArray: ", emailArray,emailArray.length,emailBatch)
+                    if (emailArray.length > 0) {
+                        const res = await validateDomainEmails(emailArray);
+                        console.log("Res: ", res);
+                        for (const email of res) {
+                            if (emailBatch.length < csvReadBatchSize) {
+                                emailBatch.push(email);
+                            }
+                            if (emailBatch.length === csvReadBatchSize) {
+                                console.log("EmailBatch ready for upload at last:", emailBatch);
+                                await batchUploadEmailAddresses(emailBatch, csvReadBatchSize);
+
+                                // const jobId = await uploadEmailBatch(emailBatch); 
+                                emailBatch = []; 
+                            }
+                        }
                     }
+                    if (emailBatch.length > 0) {
+                        console.log("EmailBatch ready for upload at end:", emailBatch);
+                        // const jobId = await uploadEmailBatch(emailBatch);
+                        await batchUploadEmailAddresses(emailBatch, csvReadBatchSize);
+                        emailBatch = []; 
+                    }
+
                     console.log('CSV file processed successfully.');
-                    resolve(); 
+                    resolve();
                 } catch (err) {
                     reject(`Error processing CSV file: ${err.message}`);
                 }
@@ -291,15 +392,14 @@ async function processCSV(filePath) {
             .on('error', (err) => reject(`Error reading CSV file: ${err.message}`));
     });
 }
-  
+
 const main = async () => {
     try {
         const filePath = getInputFilePathFromArgs(); 
-        const outputPath = getOutputPathFromArgs();
         const INvalidJobIDs = [];
         console.log('File Path:', filePath);
 
-        await processCSV(filePath).then(() => console.log('Processing completed!')).catch((err) => console.error('Error during CSV processing:', err));
+        await readCSVFile(filePath).then(() => console.log('Processing completed!')).catch((err) => console.error('Error during CSV processing:', err));
         
         console.log('All batches uploaded! Now checking job status and downloading results...');
         console.log("Jobs:", job_ids);
@@ -334,16 +434,16 @@ const main = async () => {
         }
 
         console.log("All jobs processed.");
+
         const INvalidJobs = path.join(`${outputPath}/${config.outputFolderName}`, config.invalidJobIds);
         if (!fs.existsSync(path.join(outputPath, config.outputFolderName))) {
             fs.mkdirSync(path.join(outputPath, config.outputFolderName), { recursive: true });
         }
-        await appendEmailsToFile(INvalidJobs, INvalidJobIDs);
+        await saveInvalidJobIds(INvalidJobs, INvalidJobIDs);
 
     } catch (err) {
         console.error("Error in main function:", err);
     }
 };
-
 
 await main();
